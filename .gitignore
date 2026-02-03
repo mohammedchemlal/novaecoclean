@@ -1,0 +1,34 @@
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Expo
+.expo/
+.expo-shared/
+
+# Android
+android/.gradle/
+android/local.properties
+android/app/build/
+android/build/
+
+# iOS
+ios/build/
+ios/Pods/
+
+# Logs
+*.log
+
+# Dist
+/dist/
+
+# Credentials
+*.jks
+*.keystore
+
+# Misc
+.DS_Store
+Thumbs.db

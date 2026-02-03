@@ -1,0 +1,75 @@
+{
+  "expo": {
+    "name": "Nova Ecoclean Mobile",
+    "slug": "nova-ecoclean-mobile",
+    "version": "1.0.0",
+    "platforms": ["ios", "android", "web"],
+    "orientation": "portrait",
+    "icon": "./assets/logo.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/bglogin.jpg",
+      "resizeMode": "contain",
+      "backgroundColor": "#ffffff"
+    },
+    "updates": {
+      "fallbackToCacheTimeout": 0
+    },
+    "assetBundlePatterns": ["**/*"],
+    
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.nova.ecoclean",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Cette application a besoin d'accéder à votre position pour détecter quand vous êtes proche d'un client et démarrer automatiquement les visites.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "Cette application a besoin d'accéder à votre position en arrière-plan pour détecter quand vous êtes proche d'un client et continuer à suivre les visites.",
+        "NSLocationAlwaysUsageDescription": "Cette application a besoin d'accéder à votre position en arrière-plan pour détecter quand vous êtes proche d'un client et continuer à suivre les visites.",
+        "UIBackgroundModes": ["location", "fetch"]
+      },
+      "config": {
+        "usesNonExemptEncryption": false
+      }
+    },
+    
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/logo.png",
+        "backgroundColor": "#10b981"
+      },
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_BACKGROUND_LOCATION",
+        "FOREGROUND_SERVICE"
+      ],
+      "package": "com.nova.ecoclean"
+    },
+    
+    "web": {
+      "favicon": "./assets/logo.png",
+      "bundler": "metro"
+    },
+    
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "Autoriser $(PRODUCT_NAME) à utiliser votre position en arrière-plan pour détecter quand vous êtes proche d'un client.",
+          "locationAlwaysPermission": "Autoriser $(PRODUCT_NAME) à utiliser votre position en arrière-plan pour détecter quand vous êtes proche d'un client.",
+          "locationWhenInUsePermission": "Autoriser $(PRODUCT_NAME) à utiliser votre position pour détecter quand vous êtes proche d'un client."
+        }
+      ],
+      [
+        "expo-notifications",
+        {
+          "sound": true,
+          "icon": "./assets/logo.png",
+          "color": "#10b981"
+        }
+      ],
+      "expo-task-manager"
+    ],
+    
+    "newArchEnabled": false
+  }
+}
