@@ -13,6 +13,7 @@ import {
   AppState,
   AppStateStatus
 } from 'react-native';
+import { Linking } from 'react-native';
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
@@ -21,6 +22,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Location from 'expo-location';
 import * as TaskManager from 'expo-task-manager';
 import * as Notifications from 'expo-notifications';
+import MapView, { Marker, PROVIDER_GOOGLE } from 'react-native-maps';
 
 type RootStackParamList = {
   Home: undefined;
@@ -36,6 +38,8 @@ interface Task {
   client_name: string;
   client_type: string;
   client_phone: string;
+  client_email?: string;
+  client_company?: string;
   address: string;
   latitude?: number;
   longitude?: number;
@@ -51,6 +55,8 @@ interface Task {
   icon: string;
   completed_at?: string;
   estimated_coordinates?: { lat: number; lng: number };
+  recurrent?: boolean;
+  recurrence_type?: string | null;
 }
 
 interface DayInfo {
@@ -184,6 +190,7 @@ export default function CalendrierScreen() {
   const [selectedDate, setSelectedDate] = useState<string>(
     new Date().toISOString().split('T')[0]
   );
+  const [viewMode, setViewMode] = useState<'day' | 'week' | 'month'>('day');
   const [allTasks, setAllTasks] = useState<Task[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
   const [refreshing, setRefreshing] = useState<boolean>(false);
@@ -192,6 +199,7 @@ export default function CalendrierScreen() {
     avatar: string;
     id: string;
   }>({ name: 'Chargement...', avatar: 'U', id: '' });
+  const [showMap, setShowMap] = useState<boolean>(false);
   
   const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const [modalVisible, setModalVisible] = useState<boolean>(false);
@@ -228,25 +236,30 @@ export default function CalendrierScreen() {
 const initLocationTracking = async () => {
   try {
     console.log('🛰️ Initialisation de la géolocalisation...');
+    // Éviter les réinitialisations inutiles
+    if (locationPermission && isTracking) {
+      console.log('⚙️ Géolocalisation déjà active, aucune action.');
+      return true;
+    }
     
     // D'abord, vérifier si le plugin est correctement configuré
     console.log('Vérification des permissions...');
     
-    // Demander les permissions AVANT d'utiliser Location
-    const { status: foregroundStatus } = await Location.requestForegroundPermissionsAsync();
-    
-    if (foregroundStatus !== 'granted') {
-      console.log('Permission de localisation refusée:', foregroundStatus);
-      Alert.alert(
-        'Permission requise',
-        'La géolocalisation est nécessaire pour détecter quand vous êtes proche d\'un client',
-        [{ text: 'OK' }]
-      );
-      return false;
+    // Demander les permissions AVANT d'utiliser Location (une seule fois)
+    if (!locationPermission) {
+      const { status: foregroundStatus } = await Location.requestForegroundPermissionsAsync();
+      if (foregroundStatus !== 'granted') {
+        console.log('Permission de localisation refusée:', foregroundStatus);
+        Alert.alert(
+          'Permission requise',
+          'La géolocalisation est nécessaire pour détecter quand vous êtes proche d\'un client',
+          [{ text: 'OK' }]
+        );
+        return false;
+      }
+      console.log('Permission de localisation accordée:', foregroundStatus);
+      setLocationPermission(true);
     }
-    
-    console.log('Permission de localisation accordée:', foregroundStatus);
-    setLocationPermission(true);
 
     // Essayer de demander les permissions en arrière-plan pour iOS
     if (Platform.OS === 'ios') {
@@ -346,7 +359,7 @@ const initLocationTracking = async () => {
   const checkProximityToTasks = (currentLocation: Location.LocationObject) => {
     try {
       const todayTasks = allTasks.filter(task => 
-        task.date === selectedDate && 
+        occursOnDate(task, selectedDate) && 
         task.status !== 'completed' && 
         task.status !== 'cancelled'
       );
@@ -632,10 +645,10 @@ const initLocationTracking = async () => {
         id: user.id
       });
 
-      // Récupérer les tâches
+      // Récupérer les tâches avec les infos du client (FK clients)
       const { data: userTasks, error: userError } = await supabase
         .from('tasks')
-        .select('*')
+        .select('*, clients:client_id(id, name, email, phone, company_name, address, latitude, longitude)')
         .eq('assigned_to', user.id)
         .order('date', { ascending: true })
         .order('start_time', { ascending: true });
@@ -644,14 +657,14 @@ const initLocationTracking = async () => {
 
       console.log(`✅ Tâches trouvées: ${userTasks?.length || 0}`);
       
-      // Géocoder les adresses qui n'ont pas de coordonnées
+      // Utiliser l'adresse/coordonnées du CLIENT (pas de la tâche)
       const tasksWithCoords = await Promise.all(
         (userTasks || []).map(async (task) => {
-          let lat = task.latitude;
-          let lng = task.longitude;
+          let lat = task.clients?.latitude;
+          let lng = task.clients?.longitude;
           
           if (!lat || !lng) {
-            const coords = await geocodeAddress(task.address);
+            const coords = await geocodeAddress(task.clients?.address || '');
             if (coords) {
               lat = coords.lat;
               lng = coords.lng;
@@ -661,12 +674,14 @@ const initLocationTracking = async () => {
           return {
             id: task.id,
             title: task.title || 'Tâche sans titre',
-            client_name: task.client_name || 'Client',
+            client_name: task.client_name || task.clients?.name || 'Client',
             client_type: task.client_type || 'Particulier',
-            client_phone: task.client_phone || '',
-            address: task.address || 'Adresse non spécifiée',
-            latitude: lat,
-            longitude: lng,
+            client_phone: task.client_phone || task.clients?.phone || '',
+            client_email: task.clients?.email || '',
+            client_company: task.clients?.company_name || '',
+            address: task.clients?.address || 'Adresse non spécifiée',
+            latitude: lat ?? null,
+            longitude: lng ?? null,
             start_time: task.start_time || '09:00',
             end_time: task.end_time || '10:00',
             duration_minutes: task.duration_minutes || 60,
@@ -677,7 +692,9 @@ const initLocationTracking = async () => {
             notes: task.notes || '',
             color: task.color || '#10b981',
             icon: task.icon || 'cog',
-            completed_at: task.completed_at
+            completed_at: task.completed_at,
+            recurrent: task.recurrent || false,
+            recurrence_type: task.recurrence_type || null
           };
         })
       );
@@ -765,7 +782,6 @@ const initLocationTracking = async () => {
 
   useEffect(() => {
     const initialize = async () => {
-      await fetchUserAndTasks();
       await initLocationTracking();
     };
     initialize();
@@ -788,7 +804,7 @@ const initLocationTracking = async () => {
       
       const isSelected = dateString === selectedDate;
       const isToday = dateString === new Date().toISOString().split('T')[0];
-      const taskCount = allTasks.filter(task => task.date === dateString).length;
+      const taskCount = allTasks.filter(task => occursOnDate(task, dateString)).length;
       
       days.push({
         date: dateString,
@@ -802,6 +818,65 @@ const initLocationTracking = async () => {
     }
     
     return days;
+  };
+
+  // Génère une grille mois (semaines x 7) avec infos par jour
+  const getMonthGrid = (): Array<Array<{
+    date: string;
+    dayNumber: number;
+    isSelected: boolean;
+    isToday: boolean;
+    taskCount: number;
+    hasTasks: boolean;
+  } | null>> => {
+    const d = new Date(selectedDate);
+    const year = d.getFullYear();
+    const month = d.getMonth();
+    const first = new Date(year, month, 1);
+    const last = new Date(year, month + 1, 0);
+    const daysInMonth = last.getDate();
+    const firstDay = first.getDay(); // 0=Dimanche
+    const leadingBlanks = firstDay === 0 ? 6 : firstDay - 1; // Lundi=col 0
+
+    const weeks: Array<Array<any>> = [];
+    let week: Array<any> = [];
+
+    // Ajouter blancs de début
+    for (let i = 0; i < leadingBlanks; i++) {
+      week.push(null);
+    }
+
+    // Remplir jours du mois
+    for (let day = 1; day <= daysInMonth; day++) {
+      const dateObj = new Date(year, month, day);
+      const dateStr = dateObj.toISOString().split('T')[0];
+      const isSelected = dateStr === selectedDate;
+      const isToday = dateStr === new Date().toISOString().split('T')[0];
+      const taskCount = allTasks.filter(task => occursOnDate(task, dateStr)).length;
+
+      const cell = {
+        date: dateStr,
+        dayNumber: day,
+        isSelected,
+        isToday,
+        taskCount,
+        hasTasks: taskCount > 0,
+      };
+
+      week.push(cell);
+      if (week.length === 7) {
+        weeks.push(week);
+        week = [];
+      }
+    }
+
+    // Compléter la dernière semaine
+    if (week.length > 0) {
+      while (week.length < 7) week.push(null);
+      weeks.push(week);
+    }
+
+    return weeks;
   };
 
   const navigateDay = (direction: 'prev' | 'next') => {
@@ -854,8 +929,32 @@ const initLocationTracking = async () => {
     }
   };
 
+  // Helpers for time-based day schedule
+  const timeToMinutes = (t: string | undefined): number => {
+    if (!t) return 0;
+    const parts = t.split(':');
+    const h = parseInt(parts[0] || '0', 10);
+    const m = parseInt(parts[1] || '0', 10);
+    return h * 60 + m;
+  };
+
+  const getTaskRangeMinutes = (task: Task): { start: number; end: number } => {
+    const start = timeToMinutes(task.start_time);
+    const end = task.end_time ? timeToMinutes(task.end_time) : start + (task.duration_minutes || 0);
+    return { start, end };
+  };
+
   const filteredTasks = allTasks
-    .filter(task => task.date === selectedDate)
+    .filter(task => {
+      if (viewMode === 'day') return occursOnDate(task, selectedDate);
+      if (viewMode === 'week') {
+        const { start, end } = getWeekRange(selectedDate);
+        return occursInRange(task, start, end);
+      }
+      // month
+      const { start, end } = getMonthRange(selectedDate);
+      return occursInRange(task, start, end);
+    })
     .sort((a, b) => {
       const timeA = a.start_time.replace(':', '');
       const timeB = b.start_time.replace(':', '');
@@ -863,7 +962,14 @@ const initLocationTracking = async () => {
     });
 
   const weekDays = getWeekDays();
-  const todayTasksCount = allTasks.filter(task => task.date === new Date().toISOString().split('T')[0]).length;
+  const todayTasksCount = allTasks.filter(task => occursOnDate(task, new Date().toISOString().split('T')[0])).length;
+  const tasksWithCoords = filteredTasks.filter(t => !!t.latitude && !!t.longitude);
+  const initialRegion = {
+    latitude: tasksWithCoords[0]?.latitude ?? location?.coords.latitude ?? 48.8566,
+    longitude: tasksWithCoords[0]?.longitude ?? location?.coords.longitude ?? 2.3522,
+    latitudeDelta: 0.08,
+    longitudeDelta: 0.08,
+  };
 
   if (isLoading && !refreshing) {
     return (
@@ -986,61 +1092,113 @@ const initLocationTracking = async () => {
         </View>
 
         {/* SELECTEUR DE JOUR */}
-        <View style={styles.daySelectorContainer}>
-          <TouchableOpacity 
-            style={styles.navArrow}
-            onPress={() => navigateDay('prev')}
-          >
-            <MaterialCommunityIcons name="chevron-left" size={24} color="#374151" />
-          </TouchableOpacity>
-
-          <ScrollView 
-            horizontal 
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.daysScrollContent}
-          >
-            {weekDays.map((day) => (
-              <TouchableOpacity
-                key={day.date}
-                style={[
-                  styles.dayButton,
-                  day.isSelected && styles.dayButtonSelected,
-                  day.isToday && !day.isSelected && styles.dayButtonToday
-                ]}
-                onPress={() => setSelectedDate(day.date)}
-              >
-                <Text style={[
-                  styles.dayName,
-                  day.isSelected && styles.dayNameSelected,
-                  day.isToday && !day.isSelected && styles.dayNameToday
-                ]}>
-                  {day.dayName}
-                </Text>
-                <Text style={[
-                  styles.dayNumber,
-                  day.isSelected && styles.dayNumberSelected,
-                  day.isToday && !day.isSelected && styles.dayNumberToday
-                ]}>
-                  {day.dayNumber}
-                </Text>
-                {day.hasTasks && (
-                  <View style={[
-                    styles.dayTaskDot,
-                    day.isSelected && styles.dayTaskDotSelected
-                  ]} />
-                )}
-                {day.taskCount > 0 && !day.isSelected && (
-                  <Text style={styles.dayTaskCount}>{day.taskCount}</Text>
-                )}
-              </TouchableOpacity>
+        {viewMode === 'month' ? (
+          <View style={styles.monthGrid}>
+            {getMonthGrid().map((week, wi) => (
+              <View key={`week-${wi}`} style={styles.monthRow}>
+                {week.map((cell, di) => cell ? (
+                  <TouchableOpacity
+                    key={cell.date}
+                    style={[
+                      styles.monthCell,
+                      cell.isSelected && styles.monthCellSelected,
+                      cell.isToday && styles.monthCellToday,
+                    ]}
+                    onPress={() => setSelectedDate(cell.date)}
+                  >
+                    <Text style={styles.monthCellText}>{cell.dayNumber}</Text>
+                    {cell.hasTasks && (
+                      <View style={styles.monthTaskDot} />
+                    )}
+                    {cell.taskCount > 0 && !cell.isSelected && (
+                      <Text style={styles.monthTaskCount}>{cell.taskCount}</Text>
+                    )}
+                  </TouchableOpacity>
+                ) : (
+                  <View key={`empty-${wi}-${di}`} style={[styles.monthCell, { opacity: 0.3 }]} />
+                ))}
+              </View>
             ))}
-          </ScrollView>
+          </View>
+        ) : (
+          <View style={styles.daySelectorContainer}>
+            <TouchableOpacity 
+              style={styles.navArrow}
+              onPress={() => navigateDay('prev')}
+            >
+              <MaterialCommunityIcons name="chevron-left" size={24} color="#374151" />
+            </TouchableOpacity>
 
-          <TouchableOpacity 
-            style={styles.navArrow}
-            onPress={() => navigateDay('next')}
+            <ScrollView 
+              horizontal 
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.daysScrollContent}
+            >
+              {weekDays.map((day) => (
+                <TouchableOpacity
+                  key={day.date}
+                  style={[
+                    styles.dayButton,
+                    day.isSelected && styles.dayButtonSelected,
+                    day.isToday && !day.isSelected && styles.dayButtonToday
+                  ]}
+                  onPress={() => setSelectedDate(day.date)}
+                >
+                  <Text style={[
+                    styles.dayName,
+                    day.isSelected && styles.dayNameSelected,
+                    day.isToday && !day.isSelected && styles.dayNameToday
+                  ]}>
+                    {day.dayName}
+                  </Text>
+                  <Text style={[
+                    styles.dayNumber,
+                    day.isSelected && styles.dayNumberSelected,
+                    day.isToday && !day.isSelected && styles.dayNumberToday
+                  ]}>
+                    {day.dayNumber}
+                  </Text>
+                  {day.hasTasks && (
+                    <View style={[
+                      styles.dayTaskDot,
+                      day.isSelected && styles.dayTaskDotSelected
+                    ]} />
+                  )}
+                  {day.taskCount > 0 && !day.isSelected && (
+                    <Text style={styles.dayTaskCount}>{day.taskCount}</Text>
+                  )}
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+
+            <TouchableOpacity 
+              style={styles.navArrow}
+              onPress={() => navigateDay('next')}
+            >
+              <MaterialCommunityIcons name="chevron-right" size={24} color="#374151" />
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* FILTRE VUE: Jour / Semaine / Mois */}
+        <View style={styles.viewFilterBar}>
+          <TouchableOpacity
+            style={[styles.viewFilterBtn, viewMode === 'day' && styles.viewFilterBtnActive]}
+            onPress={() => setViewMode('day')}
           >
-            <MaterialCommunityIcons name="chevron-right" size={24} color="#374151" />
+            <Text style={[styles.viewFilterText, viewMode === 'day' && styles.viewFilterTextActive]}>Jour</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.viewFilterBtn, viewMode === 'week' && styles.viewFilterBtnActive]}
+            onPress={() => setViewMode('week')}
+          >
+            <Text style={[styles.viewFilterText, viewMode === 'week' && styles.viewFilterTextActive]}>Semaine</Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.viewFilterBtn, viewMode === 'month' && styles.viewFilterBtnActive]}
+            onPress={() => setViewMode('month')}
+          >
+            <Text style={[styles.viewFilterText, viewMode === 'month' && styles.viewFilterTextActive]}>Mois</Text>
           </TouchableOpacity>
         </View>
 
@@ -1049,7 +1207,9 @@ const initLocationTracking = async () => {
           <View style={styles.dateInfo}>
             <MaterialCommunityIcons name="calendar" size={20} color="#10b981" />
             <Text style={styles.currentDateText}>
-              {formatDate(selectedDate)}
+              {viewMode === 'day' && formatDate(selectedDate)}
+              {viewMode === 'week' && (() => { const { start, end } = getWeekRange(selectedDate); return `Semaine: ${formatDate(start)} - ${formatDate(end)}`; })()}
+              {viewMode === 'month' && (() => { const { start } = getMonthRange(selectedDate); const month = new Date(start).toLocaleString('fr-FR', { month: 'long' }); const year = new Date(start).getFullYear(); return `Mois: ${month} ${year}`; })()}
             </Text>
             {filteredTasks.length > 0 && (
               <View style={styles.tasksCountBadge}>
@@ -1057,125 +1217,153 @@ const initLocationTracking = async () => {
               </View>
             )}
           </View>
-          <TouchableOpacity 
-            style={styles.todayButton}
-            onPress={jumpToToday}
-          >
-            <Text style={styles.todayButtonText}>Aujourd'hui</Text>
-          </TouchableOpacity>
+          <View style={styles.actionsRight}>
+            <TouchableOpacity 
+              style={[styles.toggleButton, showMap && { backgroundColor: '#ecfdf5', borderColor: '#10b981' }]}
+              onPress={() => setShowMap(prev => !prev)}
+            >
+              <MaterialCommunityIcons name="map" size={16} color={showMap ? '#10b981' : '#374151'} />
+              <Text style={[styles.toggleButtonText, showMap && { color: '#10b981' }]}>{showMap ? 'Masquer' : 'Carte'}</Text>
+            </TouchableOpacity>
+            <TouchableOpacity 
+              style={styles.todayButton}
+              onPress={jumpToToday}
+            >
+              <Text style={styles.todayButtonText}>Aujourd'hui</Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
-        {/* LISTE DES TÂCHES */}
-        <ScrollView 
-          style={styles.tasksContainer} 
-          showsVerticalScrollIndicator={false}
-          refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={['#10b981']} />
-          }
-        >
-          {/* TIMELINE */}
-          <View style={styles.timelineContainer}>
-            {filteredTasks.map((task) => (
-              <View key={task.id} style={styles.timelineItem}>
-                <View style={styles.timelineTime}>
-                  <Text style={styles.timelineHour}>{task.start_time}</Text>
-                  <Text style={styles.timelineDuration}>{task.duration_minutes}min</Text>
-                </View>
-                
-                <View style={[styles.timelineCard, { borderLeftColor: task.color }]}>
-                  <View style={styles.timelineCardHeader}>
-                    <View style={styles.taskTypeBadge}>
-                      <MaterialCommunityIcons 
-                        name={task.icon as any} 
-                        size={16} 
-                        color={task.color} 
-                      />
-                      <Text style={[styles.taskTypeText, { color: task.color }]}>
-                        {task.title.split(' ')[0]}
-                      </Text>
+        {showMap && (
+          <View style={styles.mapContainer}>
+            <MapView style={styles.map} initialRegion={initialRegion} provider={PROVIDER_GOOGLE}>
+              {tasksWithCoords.map((task) => (
+                <Marker
+                  key={task.id}
+                  coordinate={{ latitude: task.latitude as number, longitude: task.longitude as number }}
+                  title={task.client_name}
+                  description={`${task.title} • ${task.start_time}`}
+                  onPress={() => setSelectedTask(task)}
+                />
+              ))}
+            </MapView>
+            <View style={styles.mapHint}>
+              <MaterialCommunityIcons name="information" size={14} color="#6b7280" />
+              <Text style={styles.mapHintText}>Appuyez sur un point pour les détails</Text>
+            </View>
+          </View>
+        )}
+
+        {/* LISTE OU CALENDRIER DES TÂCHES */}
+        {!showMap && (
+          <ScrollView 
+            style={styles.tasksContainer} 
+            showsVerticalScrollIndicator={false}
+            refreshControl={
+              <RefreshControl refreshing={refreshing} onRefresh={onRefresh} colors={['#10b981']} />
+            }
+          >
+            {viewMode === 'day' ? (
+              <View style={styles.dayScheduleContainer}>
+                {Array.from({ length: (22 - 6) }, (_, i) => i + 6).map((hour) => (
+                  <View key={`hour-${hour}`} style={styles.hourBlock}>
+                    <View style={styles.hourHeader}>
+                      <Text style={styles.hourHeaderText}>{String(hour).padStart(2, '0')}:00</Text>
                     </View>
-                    
-                    <View style={styles.taskStatusRow}>
-                      <View style={[
-                        styles.priorityBadge,
-                        { backgroundColor: getPriorityColor(task.priority) + '20' }
-                      ]}>
-                        <Text style={[
-                          styles.priorityText,
-                          { color: getPriorityColor(task.priority) }
-                        ]}>
-                          {getPriorityText(task.priority)}
-                        </Text>
-                      </View>
-                      
-                      <View style={[
-                        styles.statusBadge, 
-                        { backgroundColor: getStatusColor(task.status) + '20' }
-                      ]}>
-                        <Text style={[
-                          styles.statusText, 
-                          { color: getStatusColor(task.status) }
-                        ]}>
-                          {getStatusText(task.status)}
-                        </Text>
-                      </View>
-                    </View>
+                    {([0, 30] as const).map((min) => {
+                      const slotMinutes = hour * 60 + min;
+                      const slotLabel = `${String(hour).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+                      const slotTasks = filteredTasks.filter(t => {
+                        const { start, end } = getTaskRangeMinutes(t);
+                        return start <= slotMinutes && slotMinutes < end;
+                      });
+                      return (
+                        <View key={`slot-${hour}-${min}`} style={styles.slotRow}>
+                          <Text style={styles.slotTimeLabel}>{slotLabel}</Text>
+                          <View style={styles.slotTasksRow}>
+                            {slotTasks.length === 0 ? (
+                              <View style={styles.slotEmpty} />
+                            ) : (
+                              slotTasks.map((t) => (
+                                <TouchableOpacity
+                                  key={`chip-${t.id}-${hour}-${min}`}
+                                  style={[styles.slotChip, { borderLeftColor: t.color }]}
+                                  onPress={() => handleViewDetails(t)}
+                                >
+                                  <Text style={styles.slotChipText}>{t.client_name} • {t.title}</Text>
+                                </TouchableOpacity>
+                              ))
+                            )}
+                          </View>
+                        </View>
+                      );
+                    })}
                   </View>
-                  
-                  <Text style={styles.timelineClient}>{task.client_name}</Text>
-                  <Text style={styles.timelineAddress}>{task.address}</Text>
-                  
-                  <View style={styles.timelineFooter}>
-                    <View style={styles.clientInfo}>
-                      <MaterialCommunityIcons name="phone" size={14} color="#6b7280" />
-                      <Text style={styles.clientPhone}>{task.client_phone}</Text>
-                      {task.latitude && task.longitude && (
-                        <MaterialCommunityIcons 
-                          name="map-marker" 
-                          size={14} 
-                          color="#3b82f6" 
-                          style={{ marginLeft: 8 }}
-                        />
+                ))}
+              </View>
+            ) : (
+              <View style={styles.timelineContainer}>
+                {filteredTasks.map((task) => (
+                  <View key={task.id} style={styles.timelineItem}>
+                    <View style={styles.timelineTime}>
+                      <Text style={styles.timelineHour}>{task.start_time}</Text>
+                      <Text style={styles.timelineDuration}>{task.duration_minutes}min</Text>
+                    </View>
+                    <View style={[styles.timelineCard, { borderLeftColor: task.color }]}> 
+                      <View style={styles.timelineCardHeader}>
+                        <View style={styles.taskTypeBadge}>
+                          <MaterialCommunityIcons name={task.icon as any} size={16} color={task.color} />
+                          <Text style={[styles.taskTypeText, { color: task.color }]}>{task.title.split(' ')[0]}</Text>
+                        </View>
+                        <View style={styles.taskStatusRow}>
+                          <View style={[styles.priorityBadge, { backgroundColor: getPriorityColor(task.priority) + '20' }]}>
+                            <Text style={[styles.priorityText, { color: getPriorityColor(task.priority) }]}>
+                              {getPriorityText(task.priority)}
+                            </Text>
+                          </View>
+                          <View style={[styles.statusBadge, { backgroundColor: getStatusColor(task.status) + '20' }]}>
+                            <Text style={[styles.statusText, { color: getStatusColor(task.status) }]}>
+                              {getStatusText(task.status)}
+                            </Text>
+                          </View>
+                        </View>
+                      </View>
+                      <Text style={styles.timelineClient}>{task.client_name}</Text>
+                      <Text style={styles.timelineAddress}>{task.address}</Text>
+                      <View style={styles.timelineFooter}>
+                        <View style={styles.clientInfo}>
+                          <MaterialCommunityIcons name="phone" size={14} color="#6b7280" />
+                          <Text style={styles.clientPhone}>{task.client_phone}</Text>
+                          {task.latitude && task.longitude && (
+                            <MaterialCommunityIcons name="map-marker" size={14} color="#3b82f6" style={{ marginLeft: 8 }} />
+                          )}
+                        </View>
+                        <TouchableOpacity style={[styles.detailsButton, task.status === 'in_progress' && styles.detailsButtonActive]} onPress={() => handleViewDetails(task)}>
+                          <Text style={[styles.detailsButtonText, task.status === 'in_progress' && styles.detailsButtonTextActive]}>
+                            {task.status === 'in_progress' ? 'En cours' : 'Voir détails'}
+                          </Text>
+                        </TouchableOpacity>
+                      </View>
+                      {task.notes && (
+                        <View style={styles.notesContainer}>
+                          <MaterialCommunityIcons name="note-text" size={14} color="#f59e0b" />
+                          <Text style={styles.notesText}>{task.notes}</Text>
+                        </View>
                       )}
                     </View>
-                    
-                    <TouchableOpacity 
-                      style={[
-                        styles.detailsButton,
-                        task.status === 'in_progress' && styles.detailsButtonActive
-                      ]}
-                      onPress={() => handleViewDetails(task)}
-                    >
-                      <Text style={[
-                        styles.detailsButtonText,
-                        task.status === 'in_progress' && styles.detailsButtonTextActive
-                      ]}>
-                        {task.status === 'in_progress' ? 'En cours' : 'Voir détails'}
-                      </Text>
-                    </TouchableOpacity>
                   </View>
-                  
-                  {task.notes && (
-                    <View style={styles.notesContainer}>
-                      <MaterialCommunityIcons name="note-text" size={14} color="#f59e0b" />
-                      <Text style={styles.notesText}>{task.notes}</Text>
-                    </View>
-                  )}
-                </View>
-              </View>
-            ))}
-            
-            {filteredTasks.length === 0 && (
-              <View style={styles.emptyState}>
-                <MaterialCommunityIcons name="calendar-blank" size={64} color="#d1d5db" />
-                <Text style={styles.emptyStateTitle}>Aucune tâche aujourd'hui</Text>
-                <Text style={styles.emptyStateText}>
-                  Vous n'avez pas de tâches programmées pour cette journée
-                </Text>
+                ))}
+                {filteredTasks.length === 0 && (
+                  <View style={styles.emptyState}>
+                    <MaterialCommunityIcons name="calendar-blank" size={64} color="#d1d5db" />
+                    <Text style={styles.emptyStateTitle}>Aucune tâche</Text>
+                    <Text style={styles.emptyStateText}>Aucune tâche pour cette vue</Text>
+                  </View>
+                )}
               </View>
             )}
-          </View>
-        </ScrollView>
+          </ScrollView>
+        )}
         
         {/* NAVIGATION DU BAS */}
         <View style={styles.bottomNav}>
@@ -1255,6 +1443,18 @@ const initLocationTracking = async () => {
                     <MaterialCommunityIcons name="phone" size={18} color="#6b7280" />
                     <Text style={styles.infoText}>{selectedTask.client_phone || 'Non spécifié'}</Text>
                   </View>
+                  {selectedTask.client_email ? (
+                    <View style={styles.infoRow}>
+                      <MaterialCommunityIcons name="email" size={18} color="#6b7280" />
+                      <Text style={styles.infoText}>{selectedTask.client_email}</Text>
+                    </View>
+                  ) : null}
+                  {selectedTask.client_company ? (
+                    <View style={styles.infoRow}>
+                      <MaterialCommunityIcons name="office-building" size={18} color="#6b7280" />
+                      <Text style={styles.infoText}>{selectedTask.client_company}</Text>
+                    </View>
+                  ) : null}
                   <View style={styles.infoRow}>
                     <MaterialCommunityIcons name="office-building" size={18} color="#6b7280" />
                     <Text style={styles.infoText}>{selectedTask.client_type}</Text>
@@ -1338,6 +1538,15 @@ const initLocationTracking = async () => {
 
                 {/* Boutons d'action */}
                 <View style={styles.actionButtons}>
+                  {selectedTask.latitude && selectedTask.longitude && (
+                    <TouchableOpacity 
+                      style={[styles.actionButton, styles.completeVisitButton]}
+                      onPress={() => openDirectionsForTask(selectedTask)}
+                    >
+                      <MaterialCommunityIcons name="directions" size={18} color="#fff" />
+                      <Text style={styles.completeVisitButtonText}>Voir l'itinéraire</Text>
+                    </TouchableOpacity>
+                  )}
                   {selectedTask && (() => {
                     const isNearby = selectedTask.latitude && selectedTask.longitude && location
                       ? calculateDistance(location.coords.latitude, location.coords.longitude, selectedTask.latitude, selectedTask.longitude) <= GEOFENCE_RADIUS
@@ -1395,6 +1604,108 @@ const initLocationTracking = async () => {
     </View>
   );
 }
+
+  // Déterminer si une tâche se produit à une date donnée (inclut récurrences)
+  const occursOnDate = (task: Task, dateString: string): boolean => {
+    try {
+      if (!task?.date) return false;
+      const base = new Date(task.date);
+      const d = new Date(dateString);
+      // Normaliser en début de journée
+      base.setHours(0,0,0,0);
+      d.setHours(0,0,0,0);
+
+      // Cas non récurrent: exact match
+      if (!task.recurrent) return base.getTime() === d.getTime();
+
+      // Pour les récurrences, on considère uniquement les dates >= base
+      if (d.getTime() < base.getTime()) return false;
+
+      const type = (task.recurrence_type || '').toLowerCase();
+      switch (type) {
+        case 'daily':
+          return true; // tous les jours après base
+        case 'weekly': {
+          const diffDays = Math.floor((d.getTime() - base.getTime()) / (1000*60*60*24));
+          return diffDays % 7 === 0;
+        }
+        case 'monthly':
+          return d.getDate() === base.getDate();
+        default:
+          // Si type inconnu, fallback à exact match
+          return base.getTime() === d.getTime();
+      }
+    } catch {
+      return false;
+    }
+  };
+
+  // Liste des dates dans une plage (YYYY-MM-DD)
+  const listDatesInRange = (start: string, end: string): string[] => {
+    const dates: string[] = [];
+    const startDate = new Date(start);
+    const endDate = new Date(end);
+    startDate.setHours(0,0,0,0);
+    endDate.setHours(0,0,0,0);
+    for (let d = new Date(startDate); d.getTime() <= endDate.getTime(); d.setDate(d.getDate() + 1)) {
+      dates.push(d.toISOString().split('T')[0]);
+    }
+    return dates;
+  };
+
+  // Vérifie si la tâche se produit dans une plage de dates
+  const occursInRange = (task: Task, start: string, end: string): boolean => {
+    const dates = listDatesInRange(start, end);
+    for (const ds of dates) {
+      if (occursOnDate(task, ds)) return true;
+    }
+    return false;
+  };
+
+  // Plage semaine (lundi-dimanche) autour de selectedDate
+  const getWeekRange = (dateString: string): { start: string; end: string } => {
+    const d = new Date(dateString);
+    const day = d.getDay(); // 0=Dimanche
+    const mondayOffset = (day === 0 ? -6 : 1 - day);
+    const start = new Date(d);
+    start.setDate(d.getDate() + mondayOffset);
+    const end = new Date(start);
+    end.setDate(start.getDate() + 6);
+    return { start: start.toISOString().split('T')[0], end: end.toISOString().split('T')[0] };
+  };
+
+  // Plage mois entier de selectedDate
+  const getMonthRange = (dateString: string): { start: string; end: string } => {
+    const d = new Date(dateString);
+    const start = new Date(d.getFullYear(), d.getMonth(), 1);
+    const end = new Date(d.getFullYear(), d.getMonth() + 1, 0);
+    return { start: start.toISOString().split('T')[0], end: end.toISOString().split('T')[0] };
+  };
+
+  // Ouvrir Waze (fallback web/Google Maps) pour la tâche sélectionnée
+  const openDirectionsForTask = async (task: Task) => {
+    if (!task.latitude || !task.longitude) {
+      Alert.alert('Erreur', 'Coordonnées GPS non disponibles pour cette tâche');
+      return;
+    }
+    const lat = task.latitude;
+    const lng = task.longitude;
+    const googleAndroidScheme = `google.navigation:q=${lat},${lng}`;
+    const googleIosScheme = `comgooglemaps://?daddr=${lat},${lng}&directionsmode=driving`;
+    const googleWeb = `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`;
+    try {
+      const primaryScheme = Platform.OS === 'android' ? googleAndroidScheme : googleIosScheme;
+      const canOpenGoogle = await Linking.canOpenURL(primaryScheme);
+      if (canOpenGoogle) {
+        await Linking.openURL(primaryScheme);
+        return;
+      }
+      await Linking.openURL(googleWeb);
+    } catch (err) {
+      console.error('Erreur ouverture itinéraire:', err);
+      Alert.alert('Erreur', 'Impossible d\'ouvrir l\'itinéraire');
+    }
+  };
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: '#f9fafb' },
@@ -1674,9 +1985,207 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     fontSize: 14,
   },
+  actionsRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  toggleButton: {
+    backgroundColor: '#fff',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  toggleButtonText: {
+    color: '#374151',
+    fontWeight: '600',
+    fontSize: 14,
+    marginLeft: 6,
+  },
+
+  viewFilterBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 18,
+    marginBottom: 8,
+    gap: 8,
+  },
+  viewFilterBtn: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#e5e7eb',
+    backgroundColor: '#fff',
+  },
+  viewFilterBtnActive: {
+    backgroundColor: '#ecfdf5',
+    borderColor: '#10b981',
+  },
+  viewFilterText: {
+    fontSize: 12,
+    color: '#374151',
+    fontWeight: '600',
+  },
+  viewFilterTextActive: {
+    color: '#10b981',
+  },
 
   tasksContainer: {
     flex: 1,
+  },
+
+  // Map styles
+  mapContainer: {
+    height: 220,
+    marginHorizontal: 18,
+    marginBottom: 12,
+    borderRadius: 12,
+    overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: '#f1f5f9',
+    backgroundColor: '#fff',
+  },
+  map: {
+    flex: 1,
+  },
+  mapHint: {
+    position: 'absolute',
+    left: 10,
+    bottom: 10,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,255,255,0.9)',
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  mapHintText: {
+    color: '#6b7280',
+    fontSize: 11,
+    marginLeft: 6,
+  },
+
+  // Day schedule styles
+  dayScheduleContainer: {
+    paddingHorizontal: 18,
+    paddingBottom: 12,
+  },
+  hourBlock: {
+    backgroundColor: '#ffffff',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#f1f5f9',
+    marginBottom: 10,
+    overflow: 'hidden',
+  },
+  hourHeader: {
+    backgroundColor: '#f9fafb',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f1f5f9',
+  },
+  hourHeaderText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#0f172a',
+  },
+  slotRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#f8fafc',
+  },
+  slotTimeLabel: {
+    width: 60,
+    fontSize: 12,
+    color: '#6b7280',
+    fontWeight: '600',
+  },
+  slotTasksRow: {
+    flex: 1,
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  slotEmpty: {
+    height: 18,
+    flex: 1,
+    backgroundColor: '#f9fafb',
+    borderRadius: 6,
+    borderWidth: 1,
+    borderColor: '#f3f4f6',
+  },
+  slotChip: {
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    backgroundColor: '#ffffff',
+    borderWidth: 1,
+    borderLeftWidth: 4,
+    borderColor: '#e5e7eb',
+  },
+  slotChipText: {
+    fontSize: 12,
+    color: '#374151',
+    fontWeight: '600',
+  },
+
+  // Month grid styles
+  monthGrid: {
+    paddingHorizontal: 12,
+    paddingBottom: 8,
+  },
+  monthRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 6,
+  },
+  monthCell: {
+    flex: 1,
+    backgroundColor: '#ffffff',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#f1f5f9',
+    paddingVertical: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginHorizontal: 3,
+    minHeight: 52,
+  },
+  monthCellSelected: {
+    borderColor: '#10b981',
+    backgroundColor: '#ecfdf5',
+  },
+  monthCellToday: {
+    borderColor: '#3b82f6',
+    backgroundColor: '#eff6ff',
+  },
+  monthCellText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#0f172a',
+  },
+  monthTaskDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: '#10b981',
+    marginTop: 4,
+  },
+  monthTaskCount: {
+    fontSize: 11,
+    color: '#6b7280',
+    marginTop: 2,
   },
 
   emptyState: {

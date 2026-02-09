@@ -121,12 +121,11 @@ export default function HomeScreen() {
     try {
       setLoading(true);
       const today = new Date().toISOString().split('T')[0];
-      // On ne récupère que les tâches pour aujourd'hui
+      // Récupérer toutes les tâches assignées avec infos client, puis filtrer pour aujourd'hui incluant récurrences
       const { data: tasksData, error: tasksError } = await supabase
         .from('tasks')
-        .select('*')
+        .select('*, clients:client_id(id, name, email, phone, company_name, address, latitude, longitude)')
         .eq('assigned_to', userId)
-        .eq('date', today)
         .order('date', { ascending: true });
 
       if (tasksError) {
@@ -142,26 +141,54 @@ export default function HomeScreen() {
       }
 
       // Créer les clients depuis les données des tâches
-      const clientsFromTasks: Client[] = tasksData.map((task, index) => {
+      // Filtrer les tâches pour aujourd'hui (incluant récurrences)
+      const occursToday = (task: any) => {
+        try {
+          if (!task?.date) return false;
+          const base = new Date(task.date);
+          const d = new Date(today);
+          base.setHours(0,0,0,0);
+          d.setHours(0,0,0,0);
+          if (!task.recurrent) return base.getTime() === d.getTime();
+          if (d.getTime() < base.getTime()) return false;
+          const type = (task.recurrence_type || '').toLowerCase();
+          switch (type) {
+            case 'daily':
+              return true;
+            case 'weekly': {
+              const diffDays = Math.floor((d.getTime() - base.getTime()) / (1000*60*60*24));
+              return diffDays % 7 === 0;
+            }
+            case 'monthly':
+              return d.getDate() === base.getDate();
+            default:
+              return base.getTime() === d.getTime();
+          }
+        } catch {
+          return false;
+        }
+      };
+
+      const todayTasks = (tasksData || []).filter(occursToday);
+
+      const clientsFromTasks: Client[] = todayTasks.map((task, index) => {
         const clientName = task.client_name || `Client ${index + 1}`;
-        
-        // Coordonnées par défaut (Kenitra, Maroc avec variation)
-        const baseLat = 34.2610;
-        const baseLng = -6.5802;
-        
+        const lat = (task.latitude ?? task.clients?.latitude) ?? null;
+        const lng = (task.longitude ?? task.clients?.longitude) ?? null;
+
         return {
           id: task.client_id || task.id,
           uuid: task.client_id || task.id,
-          name: clientName,
-          address: task.address || 'Adresse non spécifiée',
-          email: null,
-          phone: task.client_phone || 'Non spécifié',
-          avatar: getInitials(clientName),
-          latitude: baseLat + (index * 0.001), // Légère variation
-          longitude: baseLng + (index * 0.001),
+          name: task.client_name || task.clients?.name || clientName,
+          address: task.clients?.address || 'Adresse non spécifiée',
+          email: task.clients?.email || null,
+          phone: task.client_phone || task.clients?.phone || 'Non spécifié',
+          avatar: getInitials(task.client_name || task.clients?.name || clientName),
+          latitude: lat,
+          longitude: lng,
           notes: task.description || `Tâche: ${task.title}`,
           priority: task.priority || 'Normal',
-          company_name: null,
+          company_name: task.clients?.company_name || null,
           created_at: task.created_at || new Date().toISOString(),
           task_title: task.title,
           task_id: task.id,
@@ -178,21 +205,16 @@ export default function HomeScreen() {
         console.log(`  - ${client.name} (Tâche: ${client.task_title})`);
       });
 
-      // Enlever les doublons
-      const uniqueClients = clientsFromTasks.filter((client, index, self) =>
-        index === self.findIndex(c => c.id === client.id)
-      );
-
-      console.log(`🎯 ${uniqueClients.length} clients uniques trouvés`);
+      console.log(`🎯 ${clientsFromTasks.length} cartes de tâches à afficher`);
       
-      if (uniqueClients.length > 0) {
-        setClients(uniqueClients);
-        setSelectedClient(uniqueClients[0]);
+      if (clientsFromTasks.length > 0) {
+        setClients(clientsFromTasks);
+        setSelectedClient(clientsFromTasks[0]);
         
         // Log important pour vérification
         console.log('========================================');
-        console.log('NOM DU CLIENT À AFFICHER:', uniqueClients[0].name);
-        console.log('TÂCHE ASSOCIÉE:', uniqueClients[0].task_title);
+        console.log('NOM DU CLIENT À AFFICHER:', clientsFromTasks[0].name);
+        console.log('TÂCHE ASSOCIÉE:', clientsFromTasks[0].task_title);
         console.log('========================================');
       }
 
@@ -211,20 +233,36 @@ export default function HomeScreen() {
     }
   };
 
-  // Fonction pour ouvrir l'itinéraire
-  const handleShowDirections = (client: Client) => {
+  // Fonction pour ouvrir l'itinéraire (Waze puis fallback)
+  const handleShowDirections = async (client: Client) => {
     if (!client.latitude || !client.longitude) {
       Alert.alert('Erreur', 'Coordonnées GPS non disponibles pour ce client');
       return;
     }
-    
-    // Ouvrir l'application de cartes par défaut
-    const url = `https://www.google.com/maps/dir/?api=1&destination=${client.latitude},${client.longitude}`;
-    
-    Linking.openURL(url).catch(err => {
-      console.error('Erreur ouverture carte:', err);
-      Alert.alert('Erreur', 'Impossible d\'ouvrir l\'application de cartes');
-    });
+    const lat = client.latitude;
+    const lng = client.longitude;
+
+    const wazeScheme = `waze://?ll=${lat},${lng}&navigate=yes`;
+    const wazeWeb = `https://waze.com/ul?ll=${lat},${lng}&navigate=yes`;
+    const googleMaps = `https://www.google.com/maps/dir/?api=1&destination=${lat},${lng}`;
+    try {
+      const canOpenWaze = await Linking.canOpenURL(wazeScheme);
+      if (canOpenWaze) {
+        await Linking.openURL(wazeScheme);
+        return;
+      }
+      // Fallback web Waze
+      const canOpenWazeWeb = await Linking.canOpenURL(wazeWeb);
+      if (canOpenWazeWeb) {
+        await Linking.openURL(wazeWeb);
+        return;
+      }
+      // Fallback Google Maps
+      await Linking.openURL(googleMaps);
+    } catch (err) {
+      console.error('Erreur ouverture itinéraire:', err);
+      Alert.alert('Erreur', 'Impossible d\'ouvrir l\'itinéraire');
+    }
   };
 
   const handleMarkerPress = (client: Client) => {
@@ -350,7 +388,7 @@ export default function HomeScreen() {
               body: `${task.title || 'Tâche'} — ${task.client_name || ''}`,
               data: { taskId: task.id }
             },
-            trigger: { seconds }
+            trigger: { type: 'timeInterval', seconds, repeats: false }
           });
         } catch (err) {
           console.error('Erreur schedule notification pour task', task.id, err);
@@ -441,10 +479,13 @@ export default function HomeScreen() {
                 <RefreshControl refreshing={refreshing} onRefresh={refreshData} colors={['#10b981']} />
               }
             >
-              {clients.map((client) => (
+              {clients.map((client, index) => (
                 <TouchableOpacity
-                  key={client.id}
-                  style={[styles.clientCard, selectedClient?.id === client.id && styles.clientCardActive]}
+                  key={`${client.task_id || client.uuid || client.id}-${index}`}
+                  style={[
+                    styles.clientCard,
+                    selectedClient?.task_id === client.task_id && styles.clientCardActive
+                  ]}
                   onPress={() => setSelectedClient(client)}
                 >
                   <View style={[styles.avatar, { backgroundColor: '#10b981' }]}>
@@ -507,19 +548,19 @@ export default function HomeScreen() {
               }}
               provider="google"
             >
-              {clients.map((client) => {
+              {clients.map((client, index) => {
                 if (!client.latitude || !client.longitude) return null;
                 
                 return (
                   <Marker
-                    key={client.id}
+                    key={`${client.task_id || client.uuid || client.id}-marker-${index}`}
                     coordinate={{
                       latitude: client.latitude,
                       longitude: client.longitude,
                     }}
                     title={client.name}
                     description={client.address || 'Pas d\'adresse'}
-                    pinColor={selectedClient?.id === client.id ? "#10b981" : "#3b82f6"}
+                    pinColor={selectedClient?.task_id === client.task_id ? "#10b981" : "#3b82f6"}
                     onPress={() => handleMarkerPress(client)}
                   />
                 );

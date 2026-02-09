@@ -14,11 +14,14 @@ import {
   Alert,
 } from 'react-native';
 import { supabase } from '../src/lib/supabase';
+import { API_BASE_URL } from '../src/lib/api';
 import { MaterialIcons } from '@expo/vector-icons';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import * as Location from 'expo-location';
+import * as Notifications from 'expo-notifications';
+import Constants from 'expo-constants';
 
 type RootStackParamList = {
   Home: undefined;
@@ -35,6 +38,7 @@ export default function LoginScreen() {
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [rememberMe, setRememberMe] = useState(false);
 
   // ================== LIVE LOCATION ==================
   const startLiveLocation = async (userId: number) => {
@@ -73,6 +77,7 @@ export default function LoginScreen() {
             employee_id: userId,
             location_lat: latitude,
             location_lng: longitude,
+            updated_at: new Date(),
           });
         }
 
@@ -80,6 +85,38 @@ export default function LoginScreen() {
       }
     );
   };
+
+  // Charger les identifiants mémorisés
+  useEffect(() => {
+    // Si l'utilisateur est déjà connecté, passer l'écran de login
+    const checkExistingSession = async () => {
+      try {
+        const userData = await AsyncStorage.getItem('userData');
+        if (userData) {
+          navigation.navigate('Home');
+          return;
+        }
+      } catch {}
+    };
+    checkExistingSession();
+
+    const loadSavedCredentials = async () => {
+      try {
+        const remember = await AsyncStorage.getItem('rememberMe');
+        const savedEmail = await AsyncStorage.getItem('savedEmail');
+        const savedPassword = await AsyncStorage.getItem('savedPassword');
+        const rememberFlag = remember === 'true';
+        setRememberMe(rememberFlag);
+        if (rememberFlag) {
+          if (savedEmail) setEmail(savedEmail);
+          if (savedPassword) setPassword(savedPassword);
+        }
+      } catch (e) {
+        // ignore
+      }
+    };
+    loadSavedCredentials();
+  }, []);
 
   // ================== LOGIN ==================
   const handleLogin = async () => {
@@ -89,15 +126,37 @@ export default function LoginScreen() {
     }
 
     setLoading(true);
+    let data: any = null;
+    let error: any = null;
 
-    const { data, error } = await supabase
-      .from('users')
-      .select('*')
-      .eq('email', email)
-      .eq('password', password)
-      .single();
-
-    setLoading(false);
+    try {
+      if (API_BASE_URL) {
+        const res = await fetch(`${API_BASE_URL}/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        });
+        if (!res.ok) {
+          error = await res.json().catch(() => ({ message: 'Login error' }));
+        } else {
+          const json = await res.json();
+          data = json.user || json;
+        }
+      } else {
+        const r = await supabase
+          .from('users')
+          .select('*')
+          .eq('email', email)
+          .eq('password', password)
+          .single();
+        data = r.data;
+        error = r.error;
+      }
+    } catch (e) {
+      error = e;
+    } finally {
+      setLoading(false);
+    }
 
     if (error || !data) {
       Alert.alert('Login échoué', 'Email ou mot de passe incorrect');
@@ -109,12 +168,52 @@ export default function LoginScreen() {
 
     try {
       await AsyncStorage.setItem('userData', JSON.stringify(data));
+      // Mémoriser identifiants si demandé
+      if (rememberMe) {
+        await AsyncStorage.setItem('rememberMe', 'true');
+        await AsyncStorage.setItem('savedEmail', email);
+        await AsyncStorage.setItem('savedPassword', password);
+      } else {
+        await AsyncStorage.setItem('rememberMe', 'false');
+        await AsyncStorage.removeItem('savedEmail');
+        await AsyncStorage.removeItem('savedPassword');
+      }
     } catch (e) {
       console.error('AsyncStorage error:', e);
     }
 
     // 🔥 START LIVE LOCATION
     await startLiveLocation(data.id);
+
+    // 🔔 Register push token for notifications
+    try {
+      const { status } = await Notifications.getPermissionsAsync();
+      if (status !== 'granted') {
+        const req = await Notifications.requestPermissionsAsync();
+        if (req.status !== 'granted') {
+          console.log('Notifications permission not granted');
+        }
+      }
+      // Android channel
+      if (Platform.OS === 'android') {
+        await Notifications.setNotificationChannelAsync('default', {
+          name: 'default',
+          importance: Notifications.AndroidImportance.HIGH,
+          vibrationPattern: [0, 250, 250, 250],
+          lightColor: '#FF231F7C',
+        });
+      }
+      const projectId = Constants?.expoConfig?.extra?.eas?.projectId || Constants?.easConfig?.projectId;
+      const token = await Notifications.getExpoPushTokenAsync({ projectId });
+      if (token?.data) {
+        await supabase
+          .from('push_tokens')
+          .upsert({ user_id: data.id, token: token.data, updated_at: new Date().toISOString() }, { onConflict: 'user_id,token' });
+        console.log('Expo push token registered:', token.data);
+      }
+    } catch (e) {
+      console.error('Push token registration failed:', e);
+    }
 
     navigation.navigate('Home');
   };
@@ -185,6 +284,19 @@ export default function LoginScreen() {
               </TouchableOpacity>
             </View>
 
+            {/* Se souvenir de moi */}
+            <TouchableOpacity
+              style={styles.rememberRow}
+              onPress={() => setRememberMe(!rememberMe)}
+            >
+              <MaterialIcons
+                name={rememberMe ? 'check-box' : 'check-box-outline-blank'}
+                size={20}
+                color={'white'}
+              />
+              <Text style={styles.rememberText}>Se souvenir de moi</Text>
+            </TouchableOpacity>
+
             <TouchableOpacity style={styles.loginButton} onPress={handleLogin} disabled={loading}>
               {loading ? (
                 <ActivityIndicator color="#064e3b" />
@@ -249,4 +361,11 @@ const styles = StyleSheet.create({
   footer: { alignItems: 'center', paddingBottom: 10 },
   footerText: { fontSize: 11, color: 'white' },
   footerBrand: { fontWeight: '700', color: 'black' },
+  rememberRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 10,
+    gap: 8,
+  },
+  rememberText: { color: 'white', fontSize: 13 },
 });

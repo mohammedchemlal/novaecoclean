@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const mysql = require('mysql2');
 const path = require('path');
+const { createClient } = require('@supabase/supabase-js');
+const { Expo } = require('expo-server-sdk');
 require('dotenv').config({ path: path.join(__dirname, '.env') });
 
 const app = express();
@@ -116,3 +118,101 @@ app.listen(PORT, '0.0.0.0', () =>
 
 // Note: localtunnel removed for production hosting. When deployed to Hostinger
 // or another provider the app will be reachable at the service URL/Domain.
+
+// ===== Supabase realtime listener for new tasks -> push notifications =====
+try {
+  const SUPABASE_URL = process.env.SUPABASE_URL;
+  const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY;
+  if (!SUPABASE_URL || !SUPABASE_KEY) {
+    console.warn('⚠️ Supabase env not set; push notifications disabled. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.');
+  } else {
+    const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, { auth: { persistSession: false } });
+    const expo = new Expo();
+
+    const channel = supabase.channel('tasks-notify')
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'tasks' }, async (payload) => {
+        try {
+          const task = payload.new || {};
+          if (!task.assigned_to) return;
+          // Fetch push tokens for the assigned user
+          const { data: tokens, error } = await supabase
+            .from('push_tokens')
+            .select('token')
+            .eq('user_id', task.assigned_to);
+          if (error) {
+            console.error('Supabase tokens fetch error:', error);
+            return;
+          }
+          if (!tokens || tokens.length === 0) return;
+
+          // Prepare messages
+          const messages = tokens
+            .map((t) => t.token)
+            .filter((token) => Expo.isExpoPushToken(token))
+            .map((token) => ({
+              to: token,
+              sound: 'default',
+              title: 'Nouvelle tâche assignée',
+              body: `${task.title || 'Tâche'} — ${task.client_name || ''}`,
+              data: { taskId: task.id },
+            }));
+
+          if (messages.length === 0) return;
+
+          const chunks = expo.chunkPushNotifications(messages);
+          for (const chunk of chunks) {
+            try {
+              const receipts = await expo.sendPushNotificationsAsync(chunk);
+              console.log('📣 Push receipts:', receipts);
+            } catch (err) {
+              console.error('Expo push error:', err);
+            }
+          }
+        } catch (err) {
+          console.error('Task notify handler error:', err);
+        }
+      })
+      .subscribe((status) => {
+        console.log('📡 Supabase realtime status:', status);
+      });
+
+    process.on('SIGINT', async () => {
+      try { await supabase.removeChannel(channel); } catch {}
+      process.exit(0);
+    });
+
+    // Test route to send a manual push (for setup verification)
+    app.post('/notify-test', async (req, res) => {
+      try {
+        const { user_id, title, body } = req.body || {};
+        if (!user_id) return res.status(400).json({ ok: false, message: 'user_id required' });
+        const { data: tokens, error } = await supabase
+          .from('push_tokens')
+          .select('token')
+          .eq('user_id', user_id);
+        if (error) return res.status(500).json({ ok: false, message: 'Token fetch error', error });
+        const messages = (tokens || [])
+          .map((t) => t.token)
+          .filter((token) => Expo.isExpoPushToken(token))
+          .map((token) => ({
+            to: token,
+            sound: 'default',
+            title: title || 'Test notification',
+            body: body || 'Push setup successful',
+          }));
+        const chunks = expo.chunkPushNotifications(messages);
+        const receipts = [];
+        for (const chunk of chunks) {
+          const r = await expo.sendPushNotificationsAsync(chunk);
+          receipts.push(...r);
+        }
+        return res.json({ ok: true, receipts });
+      } catch (err) {
+        console.error('Notify-test error:', err);
+        return res.status(500).json({ ok: false, message: 'Notify-test failed' });
+      }
+    });
+  }
+} catch (err) {
+  console.error('Failed to init Supabase realtime push:', err);
+}

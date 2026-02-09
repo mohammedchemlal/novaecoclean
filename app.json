@@ -3,7 +3,11 @@
     "name": "Nova Ecoclean Mobile",
     "slug": "nova-ecoclean-mobile",
     "version": "1.0.0",
-    "platforms": ["ios", "android", "web"],
+    "platforms": [
+      "ios",
+      "android",
+      "web"
+    ],
     "orientation": "portrait",
     "icon": "./assets/logo.png",
     "userInterfaceStyle": "light",
@@ -13,10 +17,13 @@
       "backgroundColor": "#ffffff"
     },
     "updates": {
-      "fallbackToCacheTimeout": 0
+      "fallbackToCacheTimeout": 0,
+      "enabled": true,
+      "checkAutomatically": "ON_ERROR_RECOVERY"
     },
-    "assetBundlePatterns": ["**/*"],
-    
+    "assetBundlePatterns": [
+      "**/*"
+    ],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.nova.ecoclean",
@@ -24,13 +31,15 @@
         "NSLocationWhenInUseUsageDescription": "Cette application a besoin d'accéder à votre position pour détecter quand vous êtes proche d'un client et démarrer automatiquement les visites.",
         "NSLocationAlwaysAndWhenInUseUsageDescription": "Cette application a besoin d'accéder à votre position en arrière-plan pour détecter quand vous êtes proche d'un client et continuer à suivre les visites.",
         "NSLocationAlwaysUsageDescription": "Cette application a besoin d'accéder à votre position en arrière-plan pour détecter quand vous êtes proche d'un client et continuer à suivre les visites.",
-        "UIBackgroundModes": ["location", "fetch"]
+        "UIBackgroundModes": [
+          "location",
+          "fetch"
+        ]
       },
       "config": {
         "usesNonExemptEncryption": false
       }
     },
-    
     "android": {
       "adaptiveIcon": {
         "foregroundImage": "./assets/logo.png",
@@ -40,16 +49,21 @@
         "ACCESS_FINE_LOCATION",
         "ACCESS_COARSE_LOCATION",
         "ACCESS_BACKGROUND_LOCATION",
-        "FOREGROUND_SERVICE"
+        "FOREGROUND_SERVICE",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_FINE_LOCATION"
       ],
+      "config": {
+        "googleMaps": {
+          "apiKey": "YOUR_ANDROID_GOOGLE_MAPS_API_KEY"
+        }
+      },
       "package": "com.nova.ecoclean"
     },
-    
     "web": {
       "favicon": "./assets/logo.png",
       "bundler": "metro"
     },
-    
     "plugins": [
       [
         "expo-location",
@@ -69,7 +83,12 @@
       ],
       "expo-task-manager"
     ],
-    
-    "newArchEnabled": false
+    "newArchEnabled": false,
+    "extra": {
+      "apiBaseUrl": "",
+      "eas": {
+        "projectId": "274c8f0a-38c6-4e89-bb57-79878447c7fb"
+      }
+    }
   }
 }

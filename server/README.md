@@ -8,6 +8,8 @@ Required environment variables:
 - DB_PASSWORD
 - DB_NAME
 - PORT (optional)
+ - SUPABASE_URL (push notifications)
+ - SUPABASE_SERVICE_ROLE_KEY (push notifications)
 
 Quick deploy steps (Hostinger hPanel):
 1. Zip or push the `server` folder and deploy it via Hostinger "Deployments" or upload to File Manager.
@@ -32,3 +34,4 @@ Notes:
 - Ensure the MySQL server allows connections from Hostinger (if database hosted externally).
 - Do not hardcode credentials in code; use env vars.
 - For production, secure your DB (use managed DB or restrict IPs) and use hashed passwords + tokens for auth.
+ - For push notifications: add the Supabase envs and ensure the `push_tokens` table exists.
